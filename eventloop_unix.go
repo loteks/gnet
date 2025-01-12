@@ -13,12 +13,10 @@
 // limitations under the License.
 
 //go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd
-// +build darwin dragonfly freebsd linux netbsd openbsd
 
 package gnet
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -29,17 +27,16 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	gio "github.com/panjf2000/gnet/v2/internal/io"
-	"github.com/panjf2000/gnet/v2/internal/netpoll"
-	"github.com/panjf2000/gnet/v2/internal/queue"
 	errorx "github.com/panjf2000/gnet/v2/pkg/errors"
+	gio "github.com/panjf2000/gnet/v2/pkg/io"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
+	"github.com/panjf2000/gnet/v2/pkg/netpoll"
+	"github.com/panjf2000/gnet/v2/pkg/queue"
 )
 
 type eventloop struct {
 	listeners    map[int]*listener // listeners
 	idx          int               // loop index in the engine loops list
-	cache        bytes.Buffer      // temporary buffer for scattered bytes
 	engine       *engine           // engine in loop
 	poller       *netpoll.Poller   // epoll or kqueue
 	buffer       []byte            // read packet buffer whose capacity is set by user, default value is 64KB
@@ -68,10 +65,10 @@ type connWithCallback struct {
 	cb func()
 }
 
-func (el *eventloop) register(itf interface{}) error {
-	c, ok := itf.(*conn)
+func (el *eventloop) register(a any) error {
+	c, ok := a.(*conn)
 	if !ok {
-		ccb := itf.(*connWithCallback)
+		ccb := a.(*connWithCallback)
 		c = ccb.c
 		defer ccb.cb()
 	}
@@ -114,11 +111,9 @@ func (el *eventloop) open(c *conn) error {
 	return el.handleAction(c, action)
 }
 
-func (el *eventloop) read0(itf interface{}) error {
-	return el.read(itf.(*conn))
+func (el *eventloop) read0(a any) error {
+	return el.read(a.(*conn))
 }
-
-const maxBytesTransferET = 1 << 20
 
 func (el *eventloop) read(c *conn) error {
 	if !c.opened {
@@ -127,6 +122,7 @@ func (el *eventloop) read(c *conn) error {
 
 	var recv int
 	isET := el.engine.opts.EdgeTriggeredIO
+	chunk := el.engine.opts.EdgeTriggeredIOChunk
 loop:
 	n, err := unix.Read(c.fd, el.buffer)
 	if err != nil || n == 0 {
@@ -152,7 +148,7 @@ loop:
 	_, _ = c.inboundBuffer.Write(c.buffer)
 	c.buffer = c.buffer[:0]
 
-	if c.isEOF || (isET && recv < maxBytesTransferET) {
+	if c.isEOF || (isET && recv < chunk) {
 		goto loop
 	}
 
@@ -167,8 +163,8 @@ loop:
 	return nil
 }
 
-func (el *eventloop) write0(itf interface{}) error {
-	return el.write(itf.(*conn))
+func (el *eventloop) write0(a any) error {
+	return el.write(a.(*conn))
 }
 
 // The default value of UIO_MAXIOV/IOV_MAX is 1024 on Linux and most BSD-like OSs.
@@ -180,6 +176,7 @@ func (el *eventloop) write(c *conn) error {
 	}
 
 	isET := el.engine.opts.EdgeTriggeredIO
+	chunk := el.engine.opts.EdgeTriggeredIOChunk
 	var (
 		n    int
 		sent int
@@ -205,7 +202,7 @@ loop:
 	}
 	sent += n
 
-	if isET && !c.outboundBuffer.IsEmpty() && sent < maxBytesTransferET {
+	if isET && !c.outboundBuffer.IsEmpty() && sent < chunk {
 		goto loop
 	}
 
@@ -240,11 +237,11 @@ func (el *eventloop) close(c *conn, err error) error {
 		if len(iov) > iovMax {
 			iov = iov[:iovMax]
 		}
-		if n, e := gio.Writev(c.fd, iov); e != nil {
+		n, err := gio.Writev(c.fd, iov)
+		if err != nil {
 			break
-		} else { //nolint:revive
-			_, _ = c.outboundBuffer.Discard(n)
 		}
+		_, _ = c.outboundBuffer.Discard(n)
 	}
 
 	c.release()
@@ -293,11 +290,11 @@ func (el *eventloop) ticker(ctx context.Context) {
 	for {
 		delay, action = el.eventHandler.OnTick()
 		switch action {
-		case None:
+		case None, Close:
 		case Shutdown:
 			// It seems reasonable to mark this as low-priority, waiting for some tasks like asynchronous writes
 			// to finish up before shutting down the service.
-			err := el.poller.Trigger(queue.LowPriority, func(_ interface{}) error { return errorx.ErrEngineShutdown }, nil)
+			err := el.poller.Trigger(queue.LowPriority, func(_ any) error { return errorx.ErrEngineShutdown }, nil)
 			el.getLogger().Debugf("failed to enqueue shutdown signal of high-priority for event-loop(%d): %v", el.idx, err)
 		}
 		if timer == nil {
@@ -354,8 +351,8 @@ func (el *eventloop) handleAction(c *conn, action Action) error {
 }
 
 /*
-func (el *eventloop) execCmd(itf interface{}) (err error) {
-	cmd := itf.(*asyncCmd)
+func (el *eventloop) execCmd(a any) (err error) {
+	cmd := a.(*asyncCmd)
 	c := el.connections.getConnByGFD(cmd.fd)
 	if c == nil || c.gfd != cmd.fd {
 		return errorx.ErrInvalidConn
@@ -373,9 +370,9 @@ func (el *eventloop) execCmd(itf interface{}) (err error) {
 	case asyncCmdWake:
 		return el.wake(c)
 	case asyncCmdWrite:
-		_, err = c.Write(cmd.arg.([]byte))
+		_, err = c.Write(cmd.param.([]byte))
 	case asyncCmdWritev:
-		_, err = c.Writev(cmd.arg.([][]byte))
+		_, err = c.Writev(cmd.param.([][]byte))
 	default:
 		return errorx.ErrUnsupportedOp
 	}

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd
-// +build darwin dragonfly freebsd linux netbsd openbsd
 
 package gnet
 
@@ -25,22 +24,22 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/panjf2000/gnet/v2/internal/bs"
 	"github.com/panjf2000/gnet/v2/internal/gfd"
-	gio "github.com/panjf2000/gnet/v2/internal/io"
-	"github.com/panjf2000/gnet/v2/internal/netpoll"
-	"github.com/panjf2000/gnet/v2/internal/queue"
-	"github.com/panjf2000/gnet/v2/internal/socket"
+	"github.com/panjf2000/gnet/v2/pkg/bs"
 	"github.com/panjf2000/gnet/v2/pkg/buffer/elastic"
 	errorx "github.com/panjf2000/gnet/v2/pkg/errors"
+	gio "github.com/panjf2000/gnet/v2/pkg/io"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
+	"github.com/panjf2000/gnet/v2/pkg/netpoll"
 	bsPool "github.com/panjf2000/gnet/v2/pkg/pool/byteslice"
+	"github.com/panjf2000/gnet/v2/pkg/queue"
+	"github.com/panjf2000/gnet/v2/pkg/socket"
 )
 
 type conn struct {
 	fd             int                    // file descriptor
 	gfd            gfd.GFD                // gnet file descriptor
-	ctx            interface{}            // user-defined context
+	ctx            any                    // user-defined context
 	remote         unix.Sockaddr          // remote socket address
 	localAddr      net.Addr               // local addr
 	remoteAddr     net.Addr               // remote addr
@@ -49,6 +48,7 @@ type conn struct {
 	pollAttachment netpoll.PollAttachment // connection attachment for poller
 	inboundBuffer  elastic.RingBuffer     // buffer for leftover data from the remote
 	buffer         []byte                 // buffer for the latest bytes
+	cache          []byte                 // temporary cache for the inbound data
 	isDatagram     bool                   // UDP protocol
 	opened         bool                   // connection opened event fired
 	isEOF          bool                   // whether the connection has reached EOF
@@ -243,8 +243,8 @@ type asyncWriteHook struct {
 	data     []byte
 }
 
-func (c *conn) asyncWrite(itf interface{}) (err error) {
-	hook := itf.(*asyncWriteHook)
+func (c *conn) asyncWrite(a any) (err error) {
+	hook := a.(*asyncWriteHook)
 	defer func() {
 		if hook.callback != nil {
 			_ = hook.callback(c, err)
@@ -264,8 +264,8 @@ type asyncWritevHook struct {
 	data     [][]byte
 }
 
-func (c *conn) asyncWritev(itf interface{}) (err error) {
-	hook := itf.(*asyncWritevHook)
+func (c *conn) asyncWritev(a any) (err error) {
+	hook := a.(*asyncWritevHook)
 	defer func() {
 		if hook.callback != nil {
 			_ = hook.callback(c, err)
@@ -290,6 +290,7 @@ func (c *conn) sendTo(buf []byte) error {
 func (c *conn) resetBuffer() {
 	c.buffer = c.buffer[:0]
 	c.inboundBuffer.Reset()
+	c.inboundBuffer.Done()
 }
 
 func (c *conn) Read(p []byte) (n int, err error) {
@@ -318,27 +319,16 @@ func (c *conn) Next(n int) (buf []byte, err error) {
 	} else if n <= 0 {
 		n = totalLen
 	}
+
 	if c.inboundBuffer.IsEmpty() {
 		buf = c.buffer[:n]
 		c.buffer = c.buffer[n:]
 		return
 	}
-	head, tail := c.inboundBuffer.Peek(n)
-	defer c.inboundBuffer.Discard(n) //nolint:errcheck
-	if len(head) >= n {
-		return head[:n], err
-	}
-	c.loop.cache.Reset()
-	c.loop.cache.Write(head)
-	c.loop.cache.Write(tail)
-	if inBufferLen >= n {
-		return c.loop.cache.Bytes(), err
-	}
 
-	remaining := n - inBufferLen
-	c.loop.cache.Write(c.buffer[:remaining])
-	c.buffer = c.buffer[remaining:]
-	return c.loop.cache.Bytes(), err
+	buf = bsPool.Get(n)
+	_, err = c.Read(buf)
+	return
 }
 
 func (c *conn) Peek(n int) (buf []byte, err error) {
@@ -348,32 +338,40 @@ func (c *conn) Peek(n int) (buf []byte, err error) {
 	} else if n <= 0 {
 		n = totalLen
 	}
+
 	if c.inboundBuffer.IsEmpty() {
 		return c.buffer[:n], err
 	}
+
 	head, tail := c.inboundBuffer.Peek(n)
-	if len(head) >= n {
-		return head[:n], err
+	if len(head) == n {
+		return head, err
 	}
-	c.loop.cache.Reset()
-	c.loop.cache.Write(head)
-	c.loop.cache.Write(tail)
+	buf = bsPool.Get(n)[:0]
+	buf = append(buf, head...)
+	buf = append(buf, tail...)
 	if inBufferLen >= n {
-		return c.loop.cache.Bytes(), err
+		return
 	}
 
 	remaining := n - inBufferLen
-	c.loop.cache.Write(c.buffer[:remaining])
-	return c.loop.cache.Bytes(), err
+	buf = append(buf, c.buffer[:remaining]...)
+	c.cache = buf
+	return
 }
 
 func (c *conn) Discard(n int) (int, error) {
-	inBufferLen := c.inboundBuffer.Buffered()
-	tempBufferLen := len(c.buffer)
-	if inBufferLen+tempBufferLen < n || n <= 0 {
-		c.resetBuffer()
-		return inBufferLen + tempBufferLen, nil
+	if len(c.cache) > 0 {
+		bsPool.Put(c.cache)
+		c.cache = nil
 	}
+
+	inBufferLen := c.inboundBuffer.Buffered()
+	if totalLen := inBufferLen + len(c.buffer); n >= totalLen || n <= 0 {
+		c.resetBuffer()
+		return totalLen, nil
+	}
+
 	if c.inboundBuffer.IsEmpty() {
 		c.buffer = c.buffer[n:]
 		return n, nil
@@ -435,10 +433,10 @@ func (c *conn) OutboundBuffered() int {
 	return c.outboundBuffer.Buffered()
 }
 
-func (c *conn) Context() interface{}       { return c.ctx }
-func (c *conn) SetContext(ctx interface{}) { c.ctx = ctx }
-func (c *conn) LocalAddr() net.Addr        { return c.localAddr }
-func (c *conn) RemoteAddr() net.Addr       { return c.remoteAddr }
+func (c *conn) Context() any         { return c.ctx }
+func (c *conn) SetContext(ctx any)   { c.ctx = ctx }
+func (c *conn) LocalAddr() net.Addr  { return c.localAddr }
+func (c *conn) RemoteAddr() net.Addr { return c.remoteAddr }
 
 // Implementation of Socket interface
 
@@ -485,7 +483,7 @@ func (c *conn) AsyncWritev(bs [][]byte, callback AsyncCallback) error {
 }
 
 func (c *conn) Wake(callback AsyncCallback) error {
-	return c.loop.poller.Trigger(queue.LowPriority, func(_ interface{}) (err error) {
+	return c.loop.poller.Trigger(queue.LowPriority, func(_ any) (err error) {
 		err = c.loop.wake(c)
 		if callback != nil {
 			_ = callback(c, err)
@@ -495,7 +493,7 @@ func (c *conn) Wake(callback AsyncCallback) error {
 }
 
 func (c *conn) CloseWithCallback(callback AsyncCallback) error {
-	return c.loop.poller.Trigger(queue.LowPriority, func(_ interface{}) (err error) {
+	return c.loop.poller.Trigger(queue.LowPriority, func(_ any) (err error) {
 		err = c.loop.close(c, nil)
 		if callback != nil {
 			_ = callback(c, err)
@@ -505,7 +503,7 @@ func (c *conn) CloseWithCallback(callback AsyncCallback) error {
 }
 
 func (c *conn) Close() error {
-	return c.loop.poller.Trigger(queue.LowPriority, func(_ interface{}) (err error) {
+	return c.loop.poller.Trigger(queue.LowPriority, func(_ any) (err error) {
 		err = c.loop.close(c, nil)
 		return
 	}, nil)
