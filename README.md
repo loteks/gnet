@@ -13,6 +13,10 @@
 <a title="Tag" target="_blank" href="https://github.com/panjf2000/gnet/tags"><img src="https://img.shields.io/github/v/tag/panjf2000/gnet?color=%23ff8936&logo=fitbit&style=flat-square" /></a>
 </p>
 
+<p align="center">
+<a href="https://trendshift.io/repositories/9602" target="_blank"><img src="https://trendshift.io/api/badge/repositories/9602" alt="panjf2000%2Fgnet | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+</p>
+
 English | [中文](README_ZH.md)
 
 ### 🎉🎉🎉 Feel free to join [the channels about `gnet` on the Discord Server](https://discord.gg/UyKD7NZcfH).
@@ -21,9 +25,9 @@ English | [中文](README_ZH.md)
 
 `gnet` is an event-driven networking framework that is ultra-fast and lightweight. It is built from scratch by exploiting [epoll](https://man7.org/linux/man-pages/man7/epoll.7.html) and [kqueue](https://en.wikipedia.org/wiki/Kqueue) and it can achieve much higher performance with lower memory consumption than Go [net](https://golang.org/pkg/net/) in many specific scenarios.
 
-`gnet` and [net](https://golang.org/pkg/net/) don't share the same philosophy about network programming. Thus, building network applications with `gnet` can be significantly different from building them with [net](https://golang.org/pkg/net/), and the philosophies can't be reconciled. There are other similar products written in other programming languages in the community, such as [libevent](https://github.com/libevent/libevent), [libuv](https://github.com/libuv/libuv), [netty](https://github.com/netty/netty), [twisted](https://github.com/twisted/twisted), [tornado](https://github.com/tornadoweb/tornado), etc. which work in a similar pattern as `gnet` under the hood.
+`gnet` and [net](https://golang.org/pkg/net/) don't share the same philosophy in network programming. Thus, building network applications with `gnet` can be significantly different from building them with [net](https://golang.org/pkg/net/), and the philosophies can't be reconciled. There are other similar products written in other programming languages in the community, such as [libuv](https://github.com/libuv/libuv), [netty](https://github.com/netty/netty), [twisted](https://github.com/twisted/twisted), [tornado](https://github.com/tornadoweb/tornado), etc. which work in a similar pattern as `gnet` under the hood.
 
-`gnet` is not designed to displace the Go [net](https://golang.org/pkg/net/), but to create an alternative in the Go ecosystem for building performance-critical network services. As a result of which, `gnet` is not as comprehensive as Go [net](https://golang.org/pkg/net/), it provides only the core functionalities (in a concise API set) required by a network application and it doesn't plan on being a coverall networking framework, as I think Go [net](https://golang.org/pkg/net/) has done a good enough job in that area.
+`gnet` is not designed to displace the Go [net](https://golang.org/pkg/net/), but to create an alternative in the Go ecosystem for building performance-critical network services. As a result of which, `gnet` is not as comprehensive as Go [net](https://golang.org/pkg/net/), it provides only the core functionality (via a concise set of APIs) required by a network application and it doesn't plan on becoming a coverall networking framework, as I think Go [net](https://golang.org/pkg/net/) has done a good enough job in that area.
 
 `gnet` sells itself as a high-performance, lightweight, non-blocking, event-driven networking framework written in pure Go which works on the transport layer with TCP/UDP protocols and Unix Domain Socket. It enables developers to implement their own protocols(HTTP, RPC, WebSocket, Redis, etc.) of application layer upon `gnet` for building diversified network services. For instance, you get an HTTP Server if you implement HTTP protocol upon `gnet` while you have a Redis Server done with the implementation of Redis protocol upon `gnet` and so on.
 
@@ -117,6 +121,13 @@ The following corporations/organizations use `gnet` as the underlying network se
       <td align="center" valign="middle">
         <a href="https://www.zuoyebang.com/" target="_blank">
           <img src="https://res.strikefreedom.top/static_res/logos/zuoyebang-logo.jpeg" width="200" />
+        </a>
+      </td>
+    </tr>
+    <tr>
+      <td align="center" valign="middle">
+        <a href="https://www.bytedance.com/" target="_blank">
+          <img src="https://res.strikefreedom.top/static_res/logos/ByteDance_Logo.png" width="250" />
         </a>
       </td>
     </tr>
